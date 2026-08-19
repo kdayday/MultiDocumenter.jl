@@ -2,7 +2,6 @@ module MultiDocumenter
 
 import Gumbo, AbstractTrees
 using HypertextLiteral
-using JSON: JSON
 import Git: git
 
 module DocumenterTools
@@ -383,77 +382,8 @@ function cp_select_versions(src::String, dst::String, versions::Vector{String})
     return nothing
 end
 
-# Marks the block we append to versions.js, so that rewriting an already rewritten
-# versions.js replaces the block instead of appending a second one.
-const SEE_ALL_VERSIONS_BEGIN = "// BEGIN MultiDocumenter see-all-versions"
-const SEE_ALL_VERSIONS_END = "// END MultiDocumenter see-all-versions"
-
-"""
-Build the snippet appended to a package's `versions.js` that adds a "See All Versions"
-entry to Documenter's version selector, pointing at `url`.
-
-Documenter's own version selector code (`assets/html/js/versions.js`) navigates to the
-`value` of the selected `<option>`, so pointing that value at an absolute URL is enough --
-no additional client side code is needed. Documenter populates the selector from
-`DOC_VERSIONS` in a jQuery `ready` callback that may run before or after this file is
-evaluated, so we watch the selector and (re)append our entry whenever its options change.
-"""
-function see_all_versions_snippet(url::AbstractString)
-    return """
-    $(SEE_ALL_VERSIONS_BEGIN)
-    (function () {
-      var url = $(JSON.json(url));
-      var label = $(JSON.json(SEE_ALL_VERSIONS_LABEL));
-      function selectors() {
-        return document.querySelectorAll("#documenter .docs-version-selector select");
-      }
-      function append(sel) {
-        // Leave an unpopulated selector alone: Documenter only shows the selector if it
-        // has options, and an entry pointing away from the site is not worth showing alone.
-        if (!sel.options.length) return;
-        for (var i = 0; i < sel.options.length; i++) {
-          if (sel.options[i].value !== url) continue;
-          // Already present; keep it last if Documenter appended versions after it.
-          if (i !== sel.options.length - 1) sel.appendChild(sel.options[i]);
-          return;
-        }
-        var option = document.createElement("option");
-        option.value = url;
-        option.textContent = label;
-        sel.appendChild(option);
-      }
-      function update() {
-        var all = selectors();
-        for (var i = 0; i < all.length; i++) append(all[i]);
-      }
-      function start() {
-        if (window.MutationObserver) {
-          var all = selectors();
-          for (var i = 0; i < all.length; i++) {
-            new MutationObserver(update).observe(all[i], { childList: true });
-          }
-        }
-        update();
-      }
-      if (document.readyState === "loading") {
-        document.addEventListener("DOMContentLoaded", start);
-      } else {
-        start();
-      }
-    })();
-    $(SEE_ALL_VERSIONS_END)
-    """
-end
-
-"""
-Rewrite `versions.js` so that the version selector only offers `kept_versions`, and, if
-`all_versions_url` is given, also offers a "See All Versions" entry pointing at it.
-"""
-function rewrite_versions_js(
-        outpath::String,
-        kept_versions::Vector{String},
-        all_versions_url::Union{AbstractString, Nothing} = nothing,
-    )
+"""Rewrite versions.js so that the version selector only offers `kept_versions`."""
+function rewrite_versions_js(outpath::String, kept_versions::Vector{String})
     vjs = joinpath(outpath, "versions.js")
     isfile(vjs) || return nothing
     content = read(vjs, String)
@@ -462,14 +392,6 @@ function rewrite_versions_js(
         content,
         r"var\s+DOC_VERSIONS\s*=\s*\[[\s\S]*?\]" => "var DOC_VERSIONS = " * new_list,
     )
-    # Drop a previously appended block, so that this is idempotent.
-    content = replace(
-        content,
-        Regex("\\n?" * SEE_ALL_VERSIONS_BEGIN * "[\\s\\S]*?" * SEE_ALL_VERSIONS_END * "\\n?") => "",
-    )
-    if all_versions_url !== nothing
-        content = rstrip(content) * "\n" * see_all_versions_snippet(all_versions_url)
-    end
     write(vjs, content)
     return nothing
 end
@@ -488,6 +410,58 @@ function see_all_versions_url(doc::MultiDocRef)
         return nothing
     end
     return url
+end
+
+"""
+Map the output subdirectory of each version-limited `MultiDocRef` to its "See All Versions"
+URL. Refs that copy all their versions get no entry: the point of the link is to reach the
+versions that were left out.
+"""
+function see_all_versions_urls(docs::Vector)
+    urls = Dict{Vector{String}, String}()
+    for doc in Iterators.filter(x -> x isa MultiDocRef, flatten_dropdowncomponents(docs))
+        uses_include_versions(doc) || continue
+        url = see_all_versions_url(doc)
+        url === nothing && continue
+        urls[splitpath(doc.path)] = url
+    end
+    return urls
+end
+
+"""The "See All Versions" URL that applies to the page at `relative_path`, if any."""
+function see_all_versions_url_for(urls::Dict{Vector{String}, String}, relative_path::AbstractString)
+    isempty(urls) && return nothing
+    parts = splitpath(relative_path)
+    best, best_url = 0, nothing
+    for (docpath, url) in urls
+        n = length(docpath)
+        # the page has to live *below* the ref's directory, not be the directory itself
+        (n < length(parts) && n > best && view(parts, 1:n) == docpath) || continue
+        best, best_url = n, url
+    end
+    return best_url
+end
+
+"""
+Add a "See All Versions" entry to Documenter's version selector, pointing at `url`.
+
+Documenter's own selector code (`assets/html/js/versions.js`) navigates to the `value` of
+the selected `<option>` and only ever appends to the selector -- it never clears it, and it
+matches the versions from `DOC_VERSIONS` against existing options by their text. So an
+`<option>` written in at build time survives untouched and needs no client side code; it
+ends up above the versions Documenter fills in.
+"""
+function inject_see_all_versions_option!(html::Gumbo.HTMLDocument, url::AbstractString)
+    for el in AbstractTrees.PreOrderDFS(html.root)
+        el isa Gumbo.HTMLElement || continue
+        Gumbo.tag(el) == :select || continue
+        Gumbo.getattr(el, "id", "") == "documenter-version-selector" || continue
+        option = Gumbo.HTMLElement{:option}([], el, Dict("value" => url))
+        push!(option.children, Gumbo.HTMLText(option, SEE_ALL_VERSIONS_LABEL))
+        push!(el.children, option)
+        return true
+    end
+    return false
 end
 
 function make_output_structure(
@@ -510,7 +484,7 @@ function make_output_structure(
                 println(io, "<!--This file is automatically generated by MultiDocumenter.jl-->")
                 println(io, "<meta http-equiv=\"refresh\" content=\"0; url=./$(first_ver)/\"/>")
             end
-            rewrite_versions_js(outpath, doc.include_versions, see_all_versions_url(doc))
+            rewrite_versions_js(outpath, doc.include_versions)
         else
             cp(doc.upstream, outpath; force = true)
         end
@@ -642,6 +616,8 @@ function inject_styles_and_global_navigation(
     pushfirst!(custom_stylesheets, joinpath("assets", "default", "multidoc.css"))
     pushfirst!(custom_scripts, joinpath("assets", "default", "multidoc_injector.js"))
 
+    all_versions_urls = see_all_versions_urls(docs)
+
     @sync for (root, _, files) in walkdir(dir)
         for file in files
             path = joinpath(root, file)
@@ -663,6 +639,13 @@ function inject_styles_and_global_navigation(
                 scripts = make_global_scripts(custom_scripts, relpath(dir, root))
 
                 doc = Gumbo.parsehtml(page)
+
+                all_versions_url =
+                    see_all_versions_url_for(all_versions_urls, relpath(path, dir))
+                if all_versions_url !== nothing
+                    inject_see_all_versions_option!(doc, all_versions_url)
+                end
+
                 injected = 0
 
                 for el in AbstractTrees.PreOrderDFS(doc.root)

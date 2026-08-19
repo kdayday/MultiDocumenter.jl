@@ -1,6 +1,9 @@
 using Test
 using MultiDocumenter
 
+# Gumbo is not a declared test dependency, so reach it through MultiDocumenter
+const Gumbo = MultiDocumenter.Gumbo
+
 @testset "include_versions" begin
     @testset "cp_select_versions" begin
         mktempdir() do src
@@ -77,43 +80,14 @@ using MultiDocumenter
             # unrelated declarations are left alone, and we don't leave a stray `;`
             @test occursin("var DOCUMENTER_NEWEST = \"v1.0\";", content)
             @test !occursin(";;", content)
-            # no URL given, so no "See All Versions" entry
-            @test !occursin(MultiDocumenter.SEE_ALL_VERSIONS_BEGIN, content)
-        end
-    end
-
-    @testset "rewrite_versions_js with all_versions_url" begin
-        mktempdir() do dir
-            vjs = joinpath(dir, "versions.js")
-            write(vjs, versions_js)
-            url = "https://org.github.io/Pkg.jl/"
-            MultiDocumenter.rewrite_versions_js(dir, ["stable", "dev"], url)
-            content = read(vjs, String)
-            @test occursin(MultiDocumenter.SEE_ALL_VERSIONS_BEGIN, content)
-            @test occursin(MultiDocumenter.SEE_ALL_VERSIONS_END, content)
-            @test occursin("var url = \"$(url)\";", content)
-            @test occursin("var label = \"$(MultiDocumenter.SEE_ALL_VERSIONS_LABEL)\";", content)
-            @test occursin("\"stable\"", content)
-            @test !occursin("\n    \"v1.0\"", content)
-
-            # rewriting again replaces the block rather than appending a second one
-            MultiDocumenter.rewrite_versions_js(dir, ["stable", "dev"], url)
-            @test read(vjs, String) == content
-            @test count(MultiDocumenter.SEE_ALL_VERSIONS_BEGIN, content) == 1
-
-            # ... and dropping the URL removes the block again
-            MultiDocumenter.rewrite_versions_js(dir, ["stable", "dev"])
-            without = read(vjs, String)
-            @test !occursin(MultiDocumenter.SEE_ALL_VERSIONS_BEGIN, without)
-            @test !occursin(url, without)
-            @test occursin("var DOCUMENTER_NEWEST = \"v1.0\";", without)
+            # the link lives in the HTML, not here
+            @test !occursin(MultiDocumenter.SEE_ALL_VERSIONS_LABEL, content)
         end
     end
 
     @testset "rewrite_versions_js without versions.js" begin
         mktempdir() do dir
-            @test MultiDocumenter.rewrite_versions_js(dir, ["stable"], "https://x.org/") ===
-                nothing
+            @test MultiDocumenter.rewrite_versions_js(dir, ["stable"]) === nothing
             @test !isfile(joinpath(dir, "versions.js"))
         end
     end
@@ -143,6 +117,73 @@ using MultiDocumenter
                 ref(all_versions_url = "../elsewhere/")
             )
         ) === nothing
+    end
+
+    @testset "see_all_versions_urls" begin
+        ref(; kwargs...) = MultiDocumenter.MultiDocRef(;
+            upstream = "up", name = "Pkg", kwargs...
+        )
+        limited = ref(
+            path = "Limited",
+            include_versions = ["stable"],
+            all_versions_url = "https://org.github.io/Limited.jl/",
+        )
+        nested = ref(
+            path = joinpath("group", "Nested"),
+            include_versions = ["stable"],
+            all_versions_url = "https://org.github.io/Nested.jl/",
+        )
+        # a URL without include_versions has nothing to link to
+        unlimited = ref(path = "Full", all_versions_url = "https://org.github.io/Full.jl/")
+        # ... and include_versions without a URL just limits versions
+        no_url = ref(path = "Quiet", include_versions = ["stable"])
+
+        urls = MultiDocumenter.see_all_versions_urls(
+            Any[limited, nested, unlimited, no_url]
+        )
+        @test length(urls) == 2
+
+        for_page(p) = MultiDocumenter.see_all_versions_url_for(urls, p)
+        @test for_page(joinpath("Limited", "stable", "index.html")) ==
+            "https://org.github.io/Limited.jl/"
+        @test for_page(joinpath("Limited", "stable", "man", "guide.html")) ==
+            "https://org.github.io/Limited.jl/"
+        @test for_page(joinpath("group", "Nested", "stable", "index.html")) ==
+            "https://org.github.io/Nested.jl/"
+        @test for_page(joinpath("Full", "stable", "index.html")) === nothing
+        @test for_page(joinpath("Quiet", "stable", "index.html")) === nothing
+        @test for_page(joinpath("Other", "stable", "index.html")) === nothing
+        # the aggregate root and the per-package redirect stub have no selector
+        @test for_page("index.html") === nothing
+        @test for_page(joinpath("Limited", "index.html")) ==
+            "https://org.github.io/Limited.jl/"
+        @test MultiDocumenter.see_all_versions_url_for(
+            Dict{Vector{String}, String}(), joinpath("Limited", "stable", "index.html")
+        ) === nothing
+    end
+
+    @testset "inject_see_all_versions_option!" begin
+        selector = """
+        <html><body><div id="documenter">
+        <div class="docs-version-selector field has-addons">
+        <div class="control"><span class="docs-label button is-static is-size-7">Version</span></div>
+        <div class="docs-selector control is-expanded"><div class="select is-fullwidth is-size-7">
+        <select id="documenter-version-selector"></select>
+        </div></div></div></div></body></html>
+        """
+        url = "https://org.github.io/Pkg.jl/"
+
+        html = Gumbo.parsehtml(selector)
+        @test MultiDocumenter.inject_see_all_versions_option!(html, url)
+        out = string(html)
+        @test occursin("<option value=\"$(url)\">$(MultiDocumenter.SEE_ALL_VERSIONS_LABEL)</option>", out)
+        # the option is inside the selector, and it is the only one
+        @test count("<option", out) == 1
+
+        # a page without a version selector is left alone
+        bare = Gumbo.parsehtml("<html><body><div id=\"documenter\"></div></body></html>")
+        @test !MultiDocumenter.inject_see_all_versions_option!(bare, url)
+        @test !occursin("option", string(bare))
     end
 
     @testset "uses_include_versions" begin
