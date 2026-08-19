@@ -2,6 +2,25 @@ module PageFind
 using NodeJS_22_jll: npx, npm, node
 using HypertextLiteral: @htl
 
+"""
+    npm_command(shim, args...; dir) -> Cmd
+
+Command that runs one of NodeJS jll's `npm` / `npx` file products with `args`, in `dir`.
+"""
+function npm_command(
+        shim::AbstractString,
+        args::AbstractString...;
+        dir::AbstractString
+    )
+    Sys.iswindows() || return Cmd(`$(shim) $(String[args...])`; dir = dir)
+
+    wincmd_arg(arg::AbstractString) =
+        Base.shell_escape_wincmd(occursin(' ', arg) ? "\"$(arg)\"" : arg)
+
+    line = join((wincmd_arg(arg) for arg in (shim * ".cmd", args...)), ' ')
+    return Cmd(Cmd(["cmd.exe", "/S /C \"$(line)\""]); windows_verbatim = true, dir = dir)
+end
+
 function inject_script!(custom_scripts, rootpath)
     pushfirst!(custom_scripts, joinpath("assets", "default", "pagefind_integration.js"))
     pushfirst!(custom_scripts, joinpath("pagefind", "pagefind.js"))
@@ -34,9 +53,9 @@ function build_search_index(root, docs, config, rootpath)
     # To fix this, we wrap all uses of npx and npm inside `node() do ...`
     # which will automatically adjust the necessary environment variables.
     node() do _
-        if !success(Cmd(`$(npx) pagefind -V`; dir = root))
+        if !success(npm_command(npx, "pagefind", "-V"; dir = root))
             @info "Installing pagefind into $root."
-            if !success(Cmd(`$(npm) install pagefind`; dir = root))
+            if !success(npm_command(npm, "install", "pagefind"; dir = root))
                 error("Could not install pagefind.")
             end
         end
@@ -44,10 +63,19 @@ function build_search_index(root, docs, config, rootpath)
         pattern = "*/{$(join(config.index_versions, ","))}/**/*.{html}"
 
         out_path = joinpath(root, "pagefind")
-        mktempdir() do dir
+        mktempdir() do sitedir
             # pagefind doesn't look at symlinks, so we resolve them here:
-            cp(root, dir; follow_symlinks = true, force = true)
-            run(`$(npx) pagefind --site $(dir) --output-path $(out_path) --glob $(pattern) --root-selector article`)
+            cp(root, sitedir; follow_symlinks = true, force = true)
+            run(
+                npm_command(
+                    npx, "pagefind",
+                    "--site", sitedir,
+                    "--output-path", out_path,
+                    "--glob", pattern,
+                    "--root-selector", "article";
+                    dir = root,
+                )
+            )
         end
     end
 
