@@ -14,7 +14,10 @@ end
     SearchConfig(index_versions = ["stable"], engine = MultiDocumenter.PageFind, lowfi = false)
 
 `index_versions` is a vector of relative paths used for generating the search index. Only
-the first matching path is considered.
+the first matching path is considered (except for `PageFind`, which indexes all of them).
+This is one global list, so a `MultiDocRef` that publishes none of these paths -- e.g.
+because its [`VersionSelection`](@ref) keeps different ones -- contributes nothing to the
+search index; MultiDocumenter warns about each such ref during the build.
 `engine` may be `MultiDocumenter.PageFind`, `MultiDocumenter.FlexSearch`, `MultiDocumenter.Stork`,
 or a module that conforms to the expected API (which is currently undocumented).
 `lowfi = true` will try to minimize search index size. Only relevant for flexsearch.
@@ -188,7 +191,34 @@ struct BrandImage
     imagepath::String
 end
 
+"""
+Warn about any [`MultiDocRef`](@ref) that will contribute nothing to the search index.
+
+`SearchConfig.index_versions` is a single global list, but each ref decides for itself which
+versions it publishes (see [`VersionSelection`](@ref)), so a ref can easily end up with none
+of the indexed version directories in its output. Its pages are then published and linked
+from the navigation, but unreachable through the search box -- which is easy to miss, since
+nothing else about the build looks wrong.
+"""
+function warn_unindexed_refs(root, docs::Vector, index_versions::AbstractVector)
+    for ref in filter(x -> x isa MultiDocRef, docs)
+        refroot = joinpath(root, ref.path)
+        isdir(refroot) || continue
+        any(dir -> isdir(joinpath(refroot, dir)), index_versions) && continue
+        @warn(
+            "None of this package's pages will be searchable: it publishes none of the " *
+                "indexed versions. Add one of the versions it does publish to " *
+                "SearchConfig(index_versions = ...).",
+            path = ref.path,
+            index_versions,
+            published = filter(d -> isdir(joinpath(refroot, d)), readdir(refroot)),
+        )
+    end
+    return nothing
+end
+
 function walk_outputs(f, root, docs::Vector, dirs::Vector{String})
+    warn_unindexed_refs(root, docs, dirs)
     for ref in filter(x -> x isa MultiDocRef, docs)
         p = joinpath(root, ref.path)
         for dir in dirs

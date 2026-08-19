@@ -275,6 +275,61 @@ MultiDocRef_positional() =
         end
     end
 
+    @testset "warn_unindexed_refs" begin
+        mktempdir() do out
+            ref(path) = MultiDocumenter.MultiDocRef(upstream = "up", path = path, name = path)
+            for (path, versions) in
+                ["Indexed" => ["stable", "dev"], "DevOnly" => ["dev"], "Pinned" => ["v1.0.0"]]
+                for v in versions
+                    mkpath(joinpath(out, path, v))
+                end
+            end
+            docs = [ref("Indexed"), ref("DevOnly"), ref("Pinned")]
+
+            # Pinned publishes neither stable nor dev, so it gets exactly one warning;
+            # the other two are reachable through the default index_versions.
+            @test_logs (:warn,) MultiDocumenter.warn_unindexed_refs(
+                out, docs, ["stable", "dev"]
+            )
+            # narrowing the config leaves DevOnly unsearchable too
+            @test_logs (:warn,) (:warn,) MultiDocumenter.warn_unindexed_refs(
+                out, docs, ["stable"]
+            )
+            # naming what each ref actually publishes silences it
+            @test_logs MultiDocumenter.warn_unindexed_refs(
+                out, docs, ["stable", "dev", "v1.0.0"]
+            )
+            # a ref whose output is missing entirely is not this warning's business
+            @test_logs MultiDocumenter.warn_unindexed_refs(
+                out, [ref("Absent")], ["stable"]
+            )
+            # non-MultiDocRef components are ignored
+            @test_logs MultiDocumenter.warn_unindexed_refs(
+                out, [MultiDocumenter.Link("https://example.org")], ["stable"]
+            )
+        end
+    end
+
+    @testset "walk_outputs warns and still walks" begin
+        mktempdir() do out
+            mkpath(joinpath(out, "Pinned", "v1.0.0"))
+            write(joinpath(out, "Pinned", "v1.0.0", "index.html"), "<html></html>")
+            mkpath(joinpath(out, "Indexed", "stable"))
+            write(joinpath(out, "Indexed", "stable", "index.html"), "<html></html>")
+            docs = [
+                MultiDocumenter.MultiDocRef(upstream = "up", path = "Pinned", name = "Pinned"),
+                MultiDocumenter.MultiDocRef(upstream = "up", path = "Indexed", name = "Indexed"),
+            ]
+
+            walked = String[]
+            @test_logs (:warn,) MultiDocumenter.walk_outputs(out, docs, ["stable"]) do path, file
+                push!(walked, path)
+            end
+            # the warning names Pinned, and Indexed is still indexed
+            @test walked == [joinpath("Indexed", "stable")]
+        end
+    end
+
     @testset "VersionSelection" begin
         sel = MultiDocumenter.VersionSelection(["stable", "dev"])
         @test sel.versions == ["stable", "dev"]
