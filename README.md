@@ -86,15 +86,16 @@ MultiDocumenter.MultiDocRef(
     name = "SomePackage.jl",
     giturl = "https://github.com/SomeOrg/SomePackage.jl.git",
     include_versions = ["stable", "dev"],
-    # optional: defaults to URL derived from giturl
+    # optional: adds a "See All Versions" entry to the version selector
     all_versions_url = "https://someorg.github.io/SomePackage.jl/",
 )
 ```
 
 - `include_versions` copies only those version directories (plus root files like `index.html` and `versions.js`).
 - `versions.js` is rewritten to include only copied versions.
-- The version selector gets a `See All Versions` option that opens `all_versions_url` in a new tab.
-- If `all_versions_url` is omitted, MultiDocumenter derives it from `giturl` for GitHub repositories.
+- If `all_versions_url` is set, the version selector gets a `See All Versions` entry pointing
+  there, so that the versions that were not copied stay reachable on the upstream site.
+  It must be an absolute `http(s)` URL, and is not derived from `giturl`.
 
 ![example](sample.png)
 

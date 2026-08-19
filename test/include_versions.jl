@@ -2,17 +2,6 @@ using Test
 using MultiDocumenter
 
 @testset "include_versions" begin
-    @testset "giturl_to_ghpages_url" begin
-        @test MultiDocumenter.giturl_to_ghpages_url("https://github.com/JuliaDocs/Documenter.jl.git") ==
-            "https://juliadocs.github.io/Documenter.jl/"
-        @test MultiDocumenter.giturl_to_ghpages_url("https://github.com/JuliaDebug/Infiltrator.jl.git") ==
-            "https://juliadebug.github.io/Infiltrator.jl/"
-        @test MultiDocumenter.giturl_to_ghpages_url("https://github.com/avik-pal/Lux.jl") ==
-            "https://avik-pal.github.io/Lux.jl/"
-        @test isempty(MultiDocumenter.giturl_to_ghpages_url(""))
-        @test isempty(MultiDocumenter.giturl_to_ghpages_url("https://gitlab.com/org/repo"))
-    end
-
     @testset "cp_select_versions" begin
         mktempdir() do src
             write(joinpath(src, "index.html"), "<!DOCTYPE html>")
@@ -65,75 +54,105 @@ using MultiDocumenter
         end
     end
 
+    versions_js = """
+    var DOC_VERSIONS = [
+        "stable",
+        "v1.0",
+        "dev",
+    ];
+    var DOCUMENTER_NEWEST = "v1.0";
+    """
+
     @testset "rewrite_versions_js" begin
         mktempdir() do dir
             vjs = joinpath(dir, "versions.js")
-            write(
-                vjs, """
-                var DOC_VERSIONS = [
-                    "stable",
-                    "v1.0",
-                    "dev",
-                ];
-                """
-            )
+            write(vjs, versions_js)
             MultiDocumenter.rewrite_versions_js(dir, ["stable", "dev"])
             content = read(vjs, String)
             @test occursin("DOC_VERSIONS", content)
             @test occursin("\"stable\"", content)
             @test occursin("\"dev\"", content)
-            @test !occursin("v1.0", content)
+            # dropped from DOC_VERSIONS (but still named by DOCUMENTER_NEWEST below)
+            @test !occursin("\n    \"v1.0\"", content)
+            # unrelated declarations are left alone, and we don't leave a stray `;`
+            @test occursin("var DOCUMENTER_NEWEST = \"v1.0\";", content)
+            @test !occursin(";;", content)
+            # no URL given, so no "See All Versions" entry
+            @test !occursin(MultiDocumenter.SEE_ALL_VERSIONS_BEGIN, content)
         end
     end
 
-    @testset "inject_all_versions_link" begin
+    @testset "rewrite_versions_js with all_versions_url" begin
         mktempdir() do dir
-            html = joinpath(dir, "page.html")
-            write(
-                html, """
-                <!DOCTYPE html>
-                <html><head></head><body>
-                <div class="docs-version-selector"><select><option>stable</option></select></div>
-                </body></html>
-                """
+            vjs = joinpath(dir, "versions.js")
+            write(vjs, versions_js)
+            url = "https://org.github.io/Pkg.jl/"
+            MultiDocumenter.rewrite_versions_js(dir, ["stable", "dev"], url)
+            content = read(vjs, String)
+            @test occursin(MultiDocumenter.SEE_ALL_VERSIONS_BEGIN, content)
+            @test occursin(MultiDocumenter.SEE_ALL_VERSIONS_END, content)
+            @test occursin("var url = \"$(url)\";", content)
+            @test occursin("var label = \"$(MultiDocumenter.SEE_ALL_VERSIONS_LABEL)\";", content)
+            @test occursin("\"stable\"", content)
+            @test !occursin("\n    \"v1.0\"", content)
+
+            # rewriting again replaces the block rather than appending a second one
+            MultiDocumenter.rewrite_versions_js(dir, ["stable", "dev"], url)
+            @test read(vjs, String) == content
+            @test count(MultiDocumenter.SEE_ALL_VERSIONS_BEGIN, content) == 1
+
+            # ... and dropping the URL removes the block again
+            MultiDocumenter.rewrite_versions_js(dir, ["stable", "dev"])
+            without = read(vjs, String)
+            @test !occursin(MultiDocumenter.SEE_ALL_VERSIONS_BEGIN, without)
+            @test !occursin(url, without)
+            @test occursin("var DOCUMENTER_NEWEST = \"v1.0\";", without)
+        end
+    end
+
+    @testset "rewrite_versions_js without versions.js" begin
+        mktempdir() do dir
+            @test MultiDocumenter.rewrite_versions_js(dir, ["stable"], "https://x.org/") ===
+                nothing
+            @test !isfile(joinpath(dir, "versions.js"))
+        end
+    end
+
+    @testset "see_all_versions_url" begin
+        ref(; kwargs...) = MultiDocumenter.MultiDocRef(;
+            upstream = "up", path = "pkg", name = "Pkg", kwargs...
+        )
+
+        @test MultiDocumenter.see_all_versions_url(ref()) === nothing
+        @test MultiDocumenter.see_all_versions_url(ref(all_versions_url = "")) === nothing
+        @test MultiDocumenter.see_all_versions_url(
+            ref(all_versions_url = "https://org.github.io/Pkg.jl/")
+        ) == "https://org.github.io/Pkg.jl/"
+        @test MultiDocumenter.see_all_versions_url(
+            ref(all_versions_url = "http://example.org/")
+        ) == "http://example.org/"
+
+        # not derived from giturl: only an explicitly set URL is used
+        @test MultiDocumenter.see_all_versions_url(
+            ref(giturl = "https://github.com/org/Pkg.jl.git")
+        ) === nothing
+
+        # relative URLs would point inside the aggregate, so they are rejected
+        @test (
+            @test_logs (:warn,) MultiDocumenter.see_all_versions_url(
+                ref(all_versions_url = "../elsewhere/")
             )
-            url = "https://example.org/pkg.jl/"
-            MultiDocumenter.inject_all_versions_link(html, url)
-            content = read(html, String)
-            @test occursin("multidoc-see-all-versions-config", content)
-            @test occursin("\"label\":\"See All Versions\"", content)
-            @test occursin("\"sentinel\":\"__MULTIDOC_SEE_ALL_VERSIONS__\"", content)
-            @test occursin("\"target\":\"" * url * "\"", content)
-            @test occursin("</body>", content)
-        end
+        ) === nothing
     end
 
-    @testset "inject_all_versions_link idempotent" begin
-        mktempdir() do dir
-            html = joinpath(dir, "page.html")
-            write(html, """<html><body><div class="docs-version-selector"><select><option>stable</option></select></div></body></html>""")
-            MultiDocumenter.inject_all_versions_link(html, "https://x.org/")
-            first_run = read(html, String)
-            MultiDocumenter.inject_all_versions_link(html, "https://x.org/")
-            second_run = read(html, String)
-            @test first_run == second_run
-            @test count("multidoc-see-all-versions-config", first_run) == 1
-        end
-    end
+    @testset "uses_include_versions" begin
+        ref(; kwargs...) = MultiDocumenter.MultiDocRef(;
+            upstream = "up", path = "pkg", name = "Pkg", kwargs...
+        )
 
-    @testset "inject_all_versions_link replaces legacy inline script" begin
-        mktempdir() do dir
-            html = joinpath(dir, "page.html")
-            write(
-                html,
-                """<html><body><script>(function(){/* documenter-see-all-versions-option */var url="https://old.example/";})();</script></body></html>""",
-            )
-            MultiDocumenter.inject_all_versions_link(html, "https://new.example/")
-            content = read(html, String)
-            @test !occursin("documenter-see-all-versions-option", content)
-            @test occursin("multidoc-see-all-versions-config", content)
-            @test occursin("\"target\":\"https://new.example/\"", content)
-        end
+        @test !MultiDocumenter.uses_include_versions(ref())
+        @test !MultiDocumenter.uses_include_versions(ref(include_versions = String[]))
+        @test MultiDocumenter.uses_include_versions(ref(include_versions = ["stable"]))
     end
 
     @testset "MultiDocRef include_versions and all_versions_url" begin

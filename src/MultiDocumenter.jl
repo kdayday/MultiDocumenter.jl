@@ -2,6 +2,7 @@ module MultiDocumenter
 
 import Gumbo, AbstractTrees
 using HypertextLiteral
+using JSON: JSON
 import Git: git
 
 module DocumenterTools
@@ -63,11 +64,12 @@ Represents one set of docs that will get an entry in the MultiDocumenter navigat
   for this `MultiDocRef` (see also `canonical_domain` for [`make`](@ref)).
 * `include_versions`: if set (e.g. `["stable", "dev", "latest"]`), only these version directories are copied
   from upstream, reducing aggregate site size. Root files (e.g. `index.html`, `versions.js`) are always copied.
-  When set, `versions.js` is rewritten to list only these versions and an "All versions" link is added to the
-  version selector pointing to `all_versions_url`.
-* `all_versions_url`: URL for the "All versions" link in the version selector when `include_versions` is set.
-  If unset and `giturl` is set, derived from `giturl` (e.g. `https://github.com/org/pkg.jl.git` →
-  `https://org.github.io/pkg.jl/`).
+  When set, `versions.js` is rewritten to list only these versions.
+* `all_versions_url`: absolute URL of the upstream documentation site (e.g.
+  `https://org.github.io/Pkg.jl/`). If set together with `include_versions`, a
+  "See All Versions" entry pointing there is added to the version selector, so that the
+  versions that were not copied remain reachable. Not set by default; version limiting
+  works without it.
 """
 struct MultiDocRef <: DropdownComponent
     upstream::String
@@ -356,27 +358,12 @@ function maybe_clone(docs::Vector)
     return nothing
 end
 
-# --- include_versions: copy only selected version dirs and add "All versions" link ---
+# --- include_versions: copy only selected version dirs and link to the full upstream site ---
 
-const SEE_ALL_VERSIONS_SENTINEL = "__MULTIDOC_SEE_ALL_VERSIONS__"
 const SEE_ALL_VERSIONS_LABEL = "See All Versions"
-const SEE_ALL_VERSIONS_CONFIG_ID = "multidoc-see-all-versions-config"
 
-"""Derive GitHub Pages URL from git clone URL (e.g. https://github.com/org/pkg.jl.git → https://org.github.io/pkg.jl/)."""
-function giturl_to_ghpages_url(giturl::AbstractString)
-    m = match(r"github\.com[/:]([^/]+)/([^/#?]+?)(\.git)?$", giturl)
-    isnothing(m) && return ""
-    org, repo = lowercase(m[1]), m[2]
-    endswith(lowercase(repo), ".jl") || (repo = repo * ".jl")
-    return "https://$(org).github.io/$(repo)/"
-end
-
-function _all_versions_url(doc::MultiDocRef)
-    if doc.all_versions_url !== nothing && !isempty(doc.all_versions_url)
-        return doc.all_versions_url
-    end
-    return isempty(doc.giturl) ? "" : giturl_to_ghpages_url(doc.giturl)
-end
+uses_include_versions(doc::MultiDocRef) =
+    doc.include_versions !== nothing && !isempty(doc.include_versions)
 
 """Copy only root files and listed version dirs from src to dst. Skips .git and version dirs not in versions.
 When a version dir is a symlink (e.g. stable -> v5.5.0), copies the target content so the result is self-contained."""
@@ -396,66 +383,111 @@ function cp_select_versions(src::String, dst::String, versions::Vector{String})
     return nothing
 end
 
-"""Rewrite versions.js to list only kept_versions (so the version selector only shows those)."""
-function rewrite_versions_js(outpath::String, kept_versions::Vector{String})
+# Marks the block we append to versions.js, so that rewriting an already rewritten
+# versions.js replaces the block instead of appending a second one.
+const SEE_ALL_VERSIONS_BEGIN = "// BEGIN MultiDocumenter see-all-versions"
+const SEE_ALL_VERSIONS_END = "// END MultiDocumenter see-all-versions"
+
+"""
+Build the snippet appended to a package's `versions.js` that adds a "See All Versions"
+entry to Documenter's version selector, pointing at `url`.
+
+Documenter's own version selector code (`assets/html/js/versions.js`) navigates to the
+`value` of the selected `<option>`, so pointing that value at an absolute URL is enough --
+no additional client side code is needed. Documenter populates the selector from
+`DOC_VERSIONS` in a jQuery `ready` callback that may run before or after this file is
+evaluated, so we watch the selector and (re)append our entry whenever its options change.
+"""
+function see_all_versions_snippet(url::AbstractString)
+    return """
+    $(SEE_ALL_VERSIONS_BEGIN)
+    (function () {
+      var url = $(JSON.json(url));
+      var label = $(JSON.json(SEE_ALL_VERSIONS_LABEL));
+      function selectors() {
+        return document.querySelectorAll("#documenter .docs-version-selector select");
+      }
+      function append(sel) {
+        // Leave an unpopulated selector alone: Documenter only shows the selector if it
+        // has options, and an entry pointing away from the site is not worth showing alone.
+        if (!sel.options.length) return;
+        for (var i = 0; i < sel.options.length; i++) {
+          if (sel.options[i].value !== url) continue;
+          // Already present; keep it last if Documenter appended versions after it.
+          if (i !== sel.options.length - 1) sel.appendChild(sel.options[i]);
+          return;
+        }
+        var option = document.createElement("option");
+        option.value = url;
+        option.textContent = label;
+        sel.appendChild(option);
+      }
+      function update() {
+        var all = selectors();
+        for (var i = 0; i < all.length; i++) append(all[i]);
+      }
+      function start() {
+        if (window.MutationObserver) {
+          var all = selectors();
+          for (var i = 0; i < all.length; i++) {
+            new MutationObserver(update).observe(all[i], { childList: true });
+          }
+        }
+        update();
+      }
+      if (document.readyState === "loading") {
+        document.addEventListener("DOMContentLoaded", start);
+      } else {
+        start();
+      }
+    })();
+    $(SEE_ALL_VERSIONS_END)
+    """
+end
+
+"""
+Rewrite `versions.js` so that the version selector only offers `kept_versions`, and, if
+`all_versions_url` is given, also offers a "See All Versions" entry pointing at it.
+"""
+function rewrite_versions_js(
+        outpath::String,
+        kept_versions::Vector{String},
+        all_versions_url::Union{AbstractString, Nothing} = nothing,
+    )
     vjs = joinpath(outpath, "versions.js")
     isfile(vjs) || return nothing
     content = read(vjs, String)
-    new_list = "[\n    \"" * join(kept_versions, "\",\n    \"") * "\"\n];"
-    new_content = replace(content, r"var\s+DOC_VERSIONS\s*=\s*\[[\s\S]*?\]" => "var DOC_VERSIONS = " * new_list)
-    write(vjs, new_content)
+    new_list = "[\n    \"" * join(kept_versions, "\",\n    \"") * "\"\n]"
+    content = replace(
+        content,
+        r"var\s+DOC_VERSIONS\s*=\s*\[[\s\S]*?\]" => "var DOC_VERSIONS = " * new_list,
+    )
+    # Drop a previously appended block, so that this is idempotent.
+    content = replace(
+        content,
+        Regex("\\n?" * SEE_ALL_VERSIONS_BEGIN * "[\\s\\S]*?" * SEE_ALL_VERSIONS_END * "\\n?") => "",
+    )
+    if all_versions_url !== nothing
+        content = rstrip(content) * "\n" * see_all_versions_snippet(all_versions_url)
+    end
+    write(vjs, content)
     return nothing
 end
 
-"""Inject a compact config block consumed by assets/default/see_all_versions.js.
-
-The JS reads this config and appends a non-navigating sentinel option to Documenter's
-version selector that opens `all_versions_url` in a new tab. Existing legacy inline
-scripts are replaced with this config block.
 """
-function inject_all_versions_link(html_path::String, all_versions_url::String)
-    isempty(all_versions_url) && return false
-    # Require absolute URL so the link goes to the package site, not the aggregate
-    startswith(all_versions_url, "http://") || startswith(all_versions_url, "https://") || return false
-    content = read(html_path, String)
-    esc_url = replace(all_versions_url, "\"" => "\\\"")
-    config = """<script id="$(SEE_ALL_VERSIONS_CONFIG_ID)" type="application/json">{"target":"$(esc_url)","sentinel":"$(SEE_ALL_VERSIONS_SENTINEL)","label":"$(SEE_ALL_VERSIONS_LABEL)"}</script>"""
+The URL of the "See All Versions" entry for `doc`, or `nothing` if there is none.
 
-    # Normalize old inline variants to the config model
-    old_inline_rgx = r"<script>\(function\(\)\{/\* documenter-see-all-versions-option \*/[\s\S]*?\}\)\(\);\</script>"
-    if occursin(old_inline_rgx, content)
-        new_content = replace(content, old_inline_rgx => config; count = 1)
-        if new_content != content
-            write(html_path, new_content)
-            return true
-        end
-        return false
+Only absolute http(s) URLs are usable here: the entry has to point at the upstream package
+site rather than at something inside the aggregate.
+"""
+function see_all_versions_url(doc::MultiDocRef)
+    url = doc.all_versions_url
+    (url === nothing || isempty(url)) && return nothing
+    if !startswith(url, "http://") && !startswith(url, "https://")
+        @warn "Ignoring all_versions_url: not an absolute http(s) URL" doc.path url
+        return nothing
     end
-
-    existing_config_rgx = r"<script id=\"multidoc-see-all-versions-config\" type=\"application/json\">\{[\s\S]*?\}</script>"
-    if occursin(existing_config_rgx, content)
-        new_content = replace(content, existing_config_rgx => config; count = 1)
-        if new_content != content
-            write(html_path, new_content)
-            return true
-        end
-        return false
-    end
-
-    occursin("</body>", content) || return false
-    new_content = replace(content, "</body>" => config * "\n</body>"; count = 1)
-    write(html_path, new_content)
-    return true
-end
-
-function _apply_include_versions(doc::MultiDocRef, outpath::String, versions::Vector{String})
-    rewrite_versions_js(outpath, versions)
-    url = _all_versions_url(doc)
-    isempty(url) && return nothing
-    DocumenterTools.walkdocs(outpath, DocumenterTools.isdochtml) do fileinfo
-        inject_all_versions_link(fileinfo.fullpath, url)
-    end
-    return nothing
+    return url
 end
 
 function make_output_structure(
@@ -470,7 +502,7 @@ function make_output_structure(
         outpath = joinpath(dir, doc.path)
 
         mkpath(dirname(outpath))
-        if doc.include_versions !== nothing && !isempty(doc.include_versions)
+        if uses_include_versions(doc)
             cp_select_versions(doc.upstream, outpath, doc.include_versions)
             # Overwrite root index.html so we never serve the clone's redirect (e.g. to old org URL).
             first_ver = first(doc.include_versions)
@@ -478,6 +510,7 @@ function make_output_structure(
                 println(io, "<!--This file is automatically generated by MultiDocumenter.jl-->")
                 println(io, "<meta http-equiv=\"refresh\" content=\"0; url=./$(first_ver)/\"/>")
             end
+            rewrite_versions_js(outpath, doc.include_versions, see_all_versions_url(doc))
         else
             cp(doc.upstream, outpath; force = true)
         end
@@ -493,10 +526,6 @@ function make_output_structure(
         end
 
         fix_canonical_url!(doc; canonical, root_dir = dir)
-
-        if doc.include_versions !== nothing && !isempty(doc.include_versions)
-            _apply_include_versions(doc, outpath, doc.include_versions)
-        end
     end
 
     open(joinpath(dir, "index.html"), "w") do io
@@ -611,7 +640,6 @@ function inject_styles_and_global_navigation(
         search_engine.engine.inject_styles!(custom_stylesheets)
     end
     pushfirst!(custom_stylesheets, joinpath("assets", "default", "multidoc.css"))
-    pushfirst!(custom_scripts, joinpath("assets", "default", "see_all_versions.js"))
     pushfirst!(custom_scripts, joinpath("assets", "default", "multidoc_injector.js"))
 
     @sync for (root, _, files) in walkdir(dir)
