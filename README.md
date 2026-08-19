@@ -92,7 +92,11 @@ MultiDocumenter.MultiDocRef(
 ```
 
 - `include_versions` copies only those version directories (plus root files like `index.html` and `versions.js`).
-- `versions.js` is rewritten to include only copied versions.
+  Versions that do not exist upstream are reported and skipped; if none of them exist, all versions are copied.
+- The package's `index.html` is regenerated to redirect to the **first** version that was copied, and that
+  version becomes the canonical one for the package, so list them in the order you want.
+- `versions.js` is rewritten to include only copied versions, and Documenter's "outdated version" markers
+  (`DOCUMENTER_NEWEST`, `DOCUMENTER_STABLE`) are repointed at versions that were copied.
 - If `all_versions_url` is set, the version selector gets a `See All Versions` entry pointing
   there, so that the versions that were not copied stay reachable on the upstream site.
   It must be an absolute `http(s)` URL, and is not derived from `giturl`.

@@ -59,6 +59,184 @@ const Gumbo = MultiDocumenter.Gumbo
         end
     end
 
+    @testset "cp_select_versions reports what it copied" begin
+        mktempdir() do src
+            write(joinpath(src, "versions.js"), "var DOC_VERSIONS = [];")
+            mkdir(joinpath(src, "dev"))
+            write(joinpath(src, "dev", "siteinfo.js"), "{}")
+
+            mktempdir() do dst
+                # "stable" does not exist upstream, so it is reported and skipped
+                kept = @test_logs (:warn,) MultiDocumenter.cp_select_versions(
+                    src, dst, ["stable", "dev"]
+                )
+                @test kept == ["dev"]
+                @test !ispath(joinpath(dst, "stable"))
+                @test isdir(joinpath(dst, "dev"))
+            end
+
+            mktempdir() do dst
+                kept = @test_logs (:warn,) MultiDocumenter.cp_select_versions(
+                    src, dst, ["stable"]
+                )
+                @test isempty(kept)
+            end
+        end
+    end
+
+    @testset "cp_select_versions ordering follows the request" begin
+        mktempdir() do src
+            for v in ["dev", "stable"]
+                mkdir(joinpath(src, v))
+                write(joinpath(src, v, "siteinfo.js"), "{}")
+            end
+            mktempdir() do dst
+                @test MultiDocumenter.cp_select_versions(src, dst, ["dev", "stable"]) ==
+                    ["dev", "stable"]
+            end
+            mktempdir() do dst
+                @test MultiDocumenter.cp_select_versions(src, dst, ["stable", "dev"]) ==
+                    ["stable", "dev"]
+            end
+        end
+    end
+
+    @testset "cp_select_versions survives a dangling symlink" begin
+        if Sys.iswindows()
+            @test_skip false
+        else
+            mktempdir() do src
+                mkdir(joinpath(src, "dev"))
+                write(joinpath(src, "dev", "siteinfo.js"), "{}")
+                # stable -> v9.9.9, whose directory was pruned from gh-pages by hand
+                symlink("v9.9.9", joinpath(src, "stable"))
+                # a root level symlink to a file that is gone
+                symlink("nowhere.js", joinpath(src, "orphan.js"))
+
+                mktempdir() do dst
+                    # one warning, naming the dangling link -- not also a generic
+                    # "does not exist upstream" for the same entry
+                    kept = @test_logs (:warn,) MultiDocumenter.cp_select_versions(
+                        src, dst, ["stable", "dev"]
+                    )
+                    @test kept == ["dev"]
+                    @test !ispath(joinpath(dst, "stable"))
+                    @test !ispath(joinpath(dst, "orphan.js"))
+                    @test isdir(joinpath(dst, "dev"))
+                end
+            end
+        end
+    end
+
+    @testset "cp_select_versions resolves root level symlinks" begin
+        if Sys.iswindows()
+            @test_skip false
+        else
+            mktempdir() do src
+                write(joinpath(src, "real.js"), "contents")
+                symlink("real.js", joinpath(src, "alias.js"))
+                mkdir(joinpath(src, "dev"))
+                mktempdir() do dst
+                    MultiDocumenter.cp_select_versions(src, dst, ["dev"])
+                    # copied as a real file, not as a symlink that may dangle in the output
+                    @test isfile(joinpath(dst, "alias.js"))
+                    @test !islink(joinpath(dst, "alias.js"))
+                    @test read(joinpath(dst, "alias.js"), String) == "contents"
+                end
+            end
+        end
+    end
+
+    function fake_version_tree(dir, versions; newest = "v2.0.0", stable = "stable")
+        write(
+            joinpath(dir, "versions.js"),
+            "var DOC_VERSIONS = [\n  \"stable\",\n  \"v2.0.0\",\n  \"v1.0.0\",\n  \"dev\",\n];\n" *
+                "var DOCUMENTER_NEWEST = \"$(newest)\";\n",
+        )
+        for (v, current) in versions
+            mkpath(joinpath(dir, v))
+            write(
+                joinpath(dir, v, "siteinfo.js"),
+                "var DOCUMENTER_CURRENT_VERSION = \"$(current)\";\n" *
+                    "var DOCUMENTER_STABLE = \"$(stable)\";\n",
+            )
+        end
+        return nothing
+    end
+
+    @testset "rewrite_versions_js updates DOCUMENTER_NEWEST" begin
+        mktempdir() do dir
+            # v2.0.0 was not copied, so it must not keep claiming to be the newest
+            fake_version_tree(dir, ["v1.0.0" => "v1.0.0", "dev" => "dev"])
+            MultiDocumenter.rewrite_versions_js(dir, ["v1.0.0", "dev"])
+            content = read(joinpath(dir, "versions.js"), String)
+            @test occursin("var DOCUMENTER_NEWEST = \"v1.0.0\";", content)
+            @test !occursin("v2.0.0", content)
+        end
+
+        mktempdir() do dir
+            # stable holds the newest release, so DOCUMENTER_NEWEST is already right
+            fake_version_tree(dir, ["stable" => "v2.0.0", "dev" => "dev"])
+            MultiDocumenter.rewrite_versions_js(dir, ["stable", "dev"])
+            @test occursin(
+                "var DOCUMENTER_NEWEST = \"v2.0.0\";",
+                read(joinpath(dir, "versions.js"), String),
+            )
+        end
+
+        mktempdir() do dir
+            # nothing kept is a release, and `dev` never triggers the banner anyway
+            fake_version_tree(dir, ["dev" => "dev"])
+            MultiDocumenter.rewrite_versions_js(dir, ["dev"])
+            @test occursin(
+                "var DOCUMENTER_NEWEST = \"v2.0.0\";",
+                read(joinpath(dir, "versions.js"), String),
+            )
+        end
+    end
+
+    @testset "rewrite_stable_target!" begin
+        mktempdir() do dir
+            # stable was not copied, so the banner must point at the newest kept release
+            fake_version_tree(dir, ["v1.0.0" => "v1.0.0", "dev" => "dev"])
+            MultiDocumenter.rewrite_stable_target!(dir, ["v1.0.0", "dev"])
+            for v in ["v1.0.0", "dev"]
+                @test occursin(
+                    "var DOCUMENTER_STABLE = \"v1.0.0\";",
+                    read(joinpath(dir, v, "siteinfo.js"), String),
+                )
+            end
+        end
+
+        mktempdir() do dir
+            # stable was copied, so it stays the target
+            fake_version_tree(dir, ["stable" => "v2.0.0", "dev" => "dev"], stable = "stable")
+            MultiDocumenter.rewrite_stable_target!(dir, ["stable", "dev"])
+            @test occursin(
+                "var DOCUMENTER_STABLE = \"stable\";",
+                read(joinpath(dir, "stable", "siteinfo.js"), String),
+            )
+        end
+
+        mktempdir() do dir
+            # no release kept: leave siteinfo.js alone rather than invent a target
+            fake_version_tree(dir, ["dev" => "dev"])
+            before = read(joinpath(dir, "dev", "siteinfo.js"), String)
+            MultiDocumenter.rewrite_stable_target!(dir, ["dev"])
+            @test read(joinpath(dir, "dev", "siteinfo.js"), String) == before
+        end
+    end
+
+    @testset "is_generated_redirect" begin
+        @test MultiDocumenter.is_generated_redirect(
+            "<!--This file is automatically generated by MultiDocumenter.jl-->\n<meta/>"
+        )
+        @test MultiDocumenter.is_generated_redirect(
+            "<!--This file is automatically generated by Documenter.jl-->\n<meta/>"
+        )
+        @test !MultiDocumenter.is_generated_redirect("<!DOCTYPE html><html><body>hi</body>")
+    end
+
     versions_js = """
     var DOC_VERSIONS = [
         "stable",
