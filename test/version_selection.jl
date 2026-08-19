@@ -4,7 +4,10 @@ using MultiDocumenter
 # Gumbo is not a declared test dependency, so reach it through MultiDocumenter
 const Gumbo = MultiDocumenter.Gumbo
 
-@testset "include_versions" begin
+MultiDocRef_positional() =
+    MultiDocumenter.MultiDocRef("up", "pkg", "Pkg", true, "", "gh-pages")
+
+@testset "version selection" begin
     @testset "cp_select_versions" begin
         mktempdir() do src
             write(joinpath(src, "index.html"), "<!DOCTYPE html>")
@@ -272,51 +275,62 @@ const Gumbo = MultiDocumenter.Gumbo
         end
     end
 
-    @testset "see_all_versions_url" begin
-        ref(; kwargs...) = MultiDocumenter.MultiDocRef(;
-            upstream = "up", path = "pkg", name = "Pkg", kwargs...
+    @testset "VersionSelection" begin
+        sel = MultiDocumenter.VersionSelection(["stable", "dev"])
+        @test sel.versions == ["stable", "dev"]
+        @test sel.all_versions_url === nothing
+
+        sel = MultiDocumenter.VersionSelection(
+            ["stable"], all_versions_url = "https://org.github.io/Pkg.jl/"
         )
+        @test sel.all_versions_url == "https://org.github.io/Pkg.jl/"
+        @test MultiDocumenter.VersionSelection("stable").versions == ["stable"]
+        @test MultiDocumenter.VersionSelection(
+            ["stable"], all_versions_url = "http://example.org/"
+        ).all_versions_url == "http://example.org/"
 
-        @test MultiDocumenter.see_all_versions_url(ref()) === nothing
-        @test MultiDocumenter.see_all_versions_url(ref(all_versions_url = "")) === nothing
-        @test MultiDocumenter.see_all_versions_url(
-            ref(all_versions_url = "https://org.github.io/Pkg.jl/")
-        ) == "https://org.github.io/Pkg.jl/"
-        @test MultiDocumenter.see_all_versions_url(
-            ref(all_versions_url = "http://example.org/")
-        ) == "http://example.org/"
+        # a relative URL would point back into the aggregate, where the dropped versions
+        # are exactly not; a typo should fail here rather than silently do nothing
+        @test_throws ArgumentError MultiDocumenter.VersionSelection(
+            ["stable"], all_versions_url = "../elsewhere/"
+        )
+        @test_throws ArgumentError MultiDocumenter.VersionSelection(
+            ["stable"], all_versions_url = ""
+        )
+        @test_throws ArgumentError MultiDocumenter.VersionSelection(String[])
+    end
 
-        # not derived from giturl: only an explicitly set URL is used
-        @test MultiDocumenter.see_all_versions_url(
-            ref(giturl = "https://github.com/org/Pkg.jl.git")
-        ) === nothing
-
-        # relative URLs would point inside the aggregate, so they are rejected
-        @test (
-            @test_logs (:warn,) MultiDocumenter.see_all_versions_url(
-                ref(all_versions_url = "../elsewhere/")
-            )
-        ) === nothing
+    @testset "MultiDocRef versions" begin
+        ref = MultiDocumenter.MultiDocRef(
+            upstream = "up", path = "pkg", name = "Pkg",
+            versions = MultiDocumenter.VersionSelection(["stable", "dev"]),
+        )
+        @test ref.versions.versions == ["stable", "dev"]
+        @test MultiDocumenter.MultiDocRef(
+            upstream = "up", path = "pkg", name = "Pkg"
+        ).versions === nothing
+        # positional construction predates `versions` and still works
+        @test MultiDocRef_positional().versions === nothing
     end
 
     @testset "see_all_versions_urls" begin
         ref(; kwargs...) = MultiDocumenter.MultiDocRef(;
             upstream = "up", name = "Pkg", kwargs...
         )
+        select(versions; kwargs...) =
+            MultiDocumenter.VersionSelection(versions; kwargs...)
         limited = ref(
             path = "Limited",
-            include_versions = ["stable"],
-            all_versions_url = "https://org.github.io/Limited.jl/",
+            versions = select(["stable"], all_versions_url = "https://org.github.io/Limited.jl/"),
         )
         nested = ref(
             path = joinpath("group", "Nested"),
-            include_versions = ["stable"],
-            all_versions_url = "https://org.github.io/Nested.jl/",
+            versions = select(["stable"], all_versions_url = "https://org.github.io/Nested.jl/"),
         )
-        # a URL without include_versions has nothing to link to
-        unlimited = ref(path = "Full", all_versions_url = "https://org.github.io/Full.jl/")
-        # ... and include_versions without a URL just limits versions
-        no_url = ref(path = "Quiet", include_versions = ["stable"])
+        # no selection at all: nothing was left out, so there is nothing to link to
+        unlimited = ref(path = "Full")
+        # ... and a selection without a URL just limits versions
+        no_url = ref(path = "Quiet", versions = select(["stable"]))
 
         urls = MultiDocumenter.see_all_versions_urls(
             Any[limited, nested, unlimited, no_url]
@@ -364,15 +378,5 @@ const Gumbo = MultiDocumenter.Gumbo
         bare = Gumbo.parsehtml("<html><body><div id=\"documenter\"></div></body></html>")
         MultiDocumenter.inject_see_all_versions_option!(bare, url)
         @test !occursin("option", string(bare))
-    end
-
-    @testset "uses_include_versions" begin
-        ref(; kwargs...) = MultiDocumenter.MultiDocRef(;
-            upstream = "up", path = "pkg", name = "Pkg", kwargs...
-        )
-
-        @test !MultiDocumenter.uses_include_versions(ref())
-        @test !MultiDocumenter.uses_include_versions(ref(include_versions = String[]))
-        @test MultiDocumenter.uses_include_versions(ref(include_versions = ["stable"]))
     end
 end

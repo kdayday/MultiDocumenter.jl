@@ -5,8 +5,8 @@ using Test
     include("documentertools.jl")
 end
 
-@testset "include_versions" begin
-    include("include_versions.jl")
+@testset "version selection" begin
+    include("version_selection.jl")
 end
 
 clonedir = mktempdir()

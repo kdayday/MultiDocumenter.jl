@@ -43,8 +43,68 @@ users can implement their own custom components.
 abstract type DropdownComponent end
 
 """
+    struct VersionSelection
+    VersionSelection(versions; all_versions_url = nothing)
+
+Selects which deployed versions of a [`MultiDocRef`](@ref) are copied into the aggregate,
+and where the ones that are left out can still be found.
+
+Aggregating packages with long `gh-pages` histories can push the combined site past a host's
+size limit (GitHub Pages allows 1 GB), and most of that history is rarely read. Copying only
+`["stable", "dev"]` keeps the site small; `all_versions_url` then keeps the rest reachable.
+
+* `versions`: the version directories to copy, e.g. `["stable", "dev"]`. Entries that do not
+  exist upstream are reported and skipped; if none of them exist, all versions are copied
+  instead. The **first** version that was copied is what the ref's `index.html` redirects to
+  and what MultiDocumenter treats as canonical, so the order matters.
+* `all_versions_url`: absolute http(s) URL of the upstream documentation site *root*, e.g.
+  `https://org.github.io/Pkg.jl/`. When given, a "See All Versions" entry pointing there is
+  added to the version selector. Use the site root rather than a specific version:
+  Documenter's selector tries to stay on the equivalent page, so it may append the current
+  page's path to this URL.
+
+```julia
+MultiDocumenter.VersionSelection(
+    ["stable", "dev"];
+    all_versions_url = "https://org.github.io/Pkg.jl/",
+)
+```
+"""
+struct VersionSelection
+    versions::Vector{String}
+    all_versions_url::Union{String, Nothing}
+
+    function VersionSelection(
+            versions::AbstractVector{<:AbstractString};
+            all_versions_url::Union{AbstractString, Nothing} = nothing,
+        )
+        isempty(versions) && throw(
+            ArgumentError("VersionSelection: `versions` must name at least one version")
+        )
+        if all_versions_url !== nothing
+            # A relative URL would point back into the aggregate, which is precisely where
+            # the versions we did not copy are not.
+            startswith(all_versions_url, "http://") ||
+                startswith(all_versions_url, "https://") ||
+                throw(
+                ArgumentError(
+                    "VersionSelection: `all_versions_url` must be an absolute http(s) URL, got $(repr(all_versions_url))"
+                )
+            )
+        end
+        return new(
+            collect(String, versions),
+            all_versions_url === nothing ? nothing : String(all_versions_url),
+        )
+    end
+end
+
+VersionSelection(version::AbstractString; kwargs...) =
+    VersionSelection([version]; kwargs...)
+
+"""
     struct MultiDocRef <: DropdownComponent
-    MultiDocRef(; upstream, name, path, giturl = "", branch = "gh-pages", fix_canonical_url = true, include_versions = nothing, all_versions_url = nothing)
+    MultiDocRef(; upstream, name, path, giturl = "", branch = "gh-pages", fix_canonical_url = true, versions = nothing)
 
 Represents one set of docs that will get an entry in the MultiDocumenter navigation.
 
@@ -61,20 +121,12 @@ Represents one set of docs that will get an entry in the MultiDocumenter navigat
 * `branch`: Git branch of `giturl` where the docs will be pulled from (defaults to `gh-pages`)
 * `fix_canonical_url`: this can be set to `false` to disable the canonical URL fixing
   for this `MultiDocRef` (see also `canonical_domain` for [`make`](@ref)).
-* `include_versions`: if set (e.g. `["stable", "dev", "latest"]`), only these version directories are copied
-  from upstream, reducing aggregate site size. Root files (e.g. `index.html`, `versions.js`) are always copied.
-  Entries that do not exist upstream are reported and skipped; if none of them exist, all versions are
-  copied instead. When set, the root `index.html` is regenerated to redirect to the **first** version that
-  was copied -- so the order matters, since that version is also what MultiDocumenter treats as canonical
-  for this ref. `versions.js` is rewritten to list only the copied versions, and `DOCUMENTER_NEWEST` /
-  `DOCUMENTER_STABLE` are repointed at copied versions so that Documenter does not mark kept pages as
-  outdated (and `noindex`) or link its banner at a version that is no longer there.
-* `all_versions_url`: absolute URL of the upstream documentation site root (e.g.
-  `https://org.github.io/Pkg.jl/`). If set together with `include_versions`, a
-  "See All Versions" entry pointing there is added to the version selector, so that the
-  versions that were not copied remain reachable. Not set by default; version limiting
-  works without it. Use the site root rather than a specific version: Documenter's selector
-  tries to stay on the equivalent page, so it may append the current page's path to this URL.
+* `versions`: a [`VersionSelection`](@ref), to copy only some of the deployed versions
+  instead of the whole `upstream` tree. All versions are copied by default. Root files (e.g.
+  `index.html`, `versions.js`) are always copied. When a selection is given, `versions.js` is
+  rewritten to list only the copied versions, and `DOCUMENTER_NEWEST` / `DOCUMENTER_STABLE`
+  are repointed at copied versions so that Documenter does not mark kept pages as outdated
+  (and `noindex`) or link its banner at a version that is no longer there.
 """
 struct MultiDocRef <: DropdownComponent
     upstream::String
@@ -83,9 +135,12 @@ struct MultiDocRef <: DropdownComponent
     fix_canonical_url::Bool
     giturl::String
     branch::String
-    include_versions::Union{Vector{String}, Nothing}
-    all_versions_url::Union{String, Nothing}
+    versions::Union{VersionSelection, Nothing}
 end
+
+# so that positional construction keeps working as it did before `versions` was added
+MultiDocRef(upstream, path, name, fix_canonical_url, giturl, branch) =
+    MultiDocRef(upstream, path, name, fix_canonical_url, giturl, branch, nothing)
 
 function MultiDocRef(;
         upstream,
@@ -94,10 +149,9 @@ function MultiDocRef(;
         giturl = "",
         branch = "gh-pages",
         fix_canonical_url = true,
-        include_versions = nothing,
-        all_versions_url = nothing,
+        versions::Union{VersionSelection, Nothing} = nothing,
     )
-    return MultiDocRef(upstream, path, name, fix_canonical_url, giturl, branch, include_versions, all_versions_url)
+    return MultiDocRef(upstream, path, name, fix_canonical_url, giturl, branch, versions)
 end
 
 """
@@ -363,7 +417,7 @@ function maybe_clone(docs::Vector)
     return nothing
 end
 
-# --- include_versions: copy only selected version dirs and link to the full upstream site ---
+# --- VersionSelection: copy only selected version dirs and link to the full upstream site ---
 
 const SEE_ALL_VERSIONS_LABEL = "See All Versions"
 
@@ -378,9 +432,6 @@ first fetch and run the whole aggregate front end, and would destroy the marker 
 is_generated_redirect(page::AbstractString) =
     startswith(page, "<!--This file is automatically generated by Documenter.jl-->") ||
     startswith(page, GENERATED_REDIRECT_MARKER)
-
-uses_include_versions(doc::MultiDocRef) =
-    doc.include_versions !== nothing && !isempty(doc.include_versions)
 
 """
 Copy all root files and the listed version directories from `src` to `dst`, skipping `.git`
@@ -415,7 +466,7 @@ function cp_select_versions(src::String, dst::String, versions::Vector{String})
     # dangling ones are already reported above, with a more specific reason
     missing_versions = filter(v -> v ∉ copied && v ∉ dangling, versions)
     isempty(missing_versions) ||
-        @warn "Some versions in include_versions do not exist upstream and were skipped" src missing_versions
+        @warn "Some selected versions do not exist upstream and were skipped" src missing_versions
     # preserve the caller's ordering: it decides which version the ref lands on
     copiedset = Set(copied)
     return filter(in(copiedset), versions)
@@ -511,31 +562,15 @@ function rewrite_stable_target!(outpath::String, kept_versions::Vector{String})
 end
 
 """
-The URL of the "See All Versions" entry for `doc`, or `nothing` if there is none.
-
-Only absolute http(s) URLs are usable here: the entry has to point at the upstream package
-site rather than at something inside the aggregate.
-"""
-function see_all_versions_url(doc::MultiDocRef)
-    url = doc.all_versions_url
-    (url === nothing || isempty(url)) && return nothing
-    if !startswith(url, "http://") && !startswith(url, "https://")
-        @warn "Ignoring all_versions_url: not an absolute http(s) URL" doc.path url
-        return nothing
-    end
-    return url
-end
-
-"""
 Map the output subdirectory of each version-limited `MultiDocRef` to its "See All Versions"
 URL. Refs that copy all their versions get no entry: the point of the link is to reach the
-versions that were left out.
+versions that were left out, and there are none.
 """
 function see_all_versions_urls(docs::Vector)
     urls = Dict{Vector{String}, String}()
     for doc in Iterators.filter(x -> x isa MultiDocRef, flatten_dropdowncomponents(docs))
-        uses_include_versions(doc) || continue
-        url = see_all_versions_url(doc)
+        doc.versions === nothing && continue
+        url = doc.versions.all_versions_url
         url === nothing && continue
         urls[splitpath(doc.path)] = url
     end
@@ -600,19 +635,19 @@ function make_output_structure(
         outpath = joinpath(dir, doc.path)
 
         mkpath(dirname(outpath))
-        if uses_include_versions(doc)
-            kept_versions = cp_select_versions(doc.upstream, outpath, doc.include_versions)
+        if doc.versions !== nothing
+            kept_versions = cp_select_versions(doc.upstream, outpath, doc.versions.versions)
             if isempty(kept_versions)
                 # A limited copy would leave a ref that only 404s, so fall back to copying
-                # everything -- what happens without include_versions -- rather than
+                # everything -- what happens without a VersionSelection -- rather than
                 # publishing a broken entry.
-                @warn "None of the versions in include_versions exist upstream; copying all versions instead" doc.path doc.include_versions
+                @warn "None of the selected versions exist upstream; copying all versions instead" doc.path doc.versions.versions
                 rm(outpath; force = true, recursive = true)
                 cp(doc.upstream, outpath; force = true)
             else
                 # Overwrite the root index.html so we never serve the clone's redirect (it
                 # may point at an old org URL, or at a version we did not copy). The first
-                # kept version wins, so the order of include_versions decides where the ref
+                # kept version wins, so the order of the selection decides where the ref
                 # lands, and which version fix_canonical_url! treats as canonical.
                 open(joinpath(outpath, "index.html"), "w") do io
                     println(io, GENERATED_REDIRECT_MARKER)
