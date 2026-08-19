@@ -428,18 +428,21 @@ function see_all_versions_urls(docs::Vector)
     return urls
 end
 
-"""The "See All Versions" URL that applies to the page at `relative_path`, if any."""
+"""
+The "See All Versions" URL that applies to the page at `relative_path`, if any.
+
+At most one ref can match: two refs whose paths nest would copy over each other in
+[`make_output_structure`](@ref) to begin with.
+"""
 function see_all_versions_url_for(urls::Dict{Vector{String}, String}, relative_path::AbstractString)
     isempty(urls) && return nothing
     parts = splitpath(relative_path)
-    best, best_url = 0, nothing
     for (docpath, url) in urls
         n = length(docpath)
         # the page has to live *below* the ref's directory, not be the directory itself
-        (n < length(parts) && n > best && view(parts, 1:n) == docpath) || continue
-        best, best_url = n, url
+        n < length(parts) && view(parts, 1:n) == docpath && return url
     end
-    return best_url
+    return nothing
 end
 
 """
@@ -450,6 +453,8 @@ the selected `<option>` and only ever appends to the selector -- it never clears
 matches the versions from `DOC_VERSIONS` against existing options by their text. So an
 `<option>` written in at build time survives untouched and needs no client side code; it
 ends up above the versions Documenter fills in.
+
+Pages without a version selector (e.g. the redirect stubs) are left alone.
 """
 function inject_see_all_versions_option!(html::Gumbo.HTMLDocument, url::AbstractString)
     for el in AbstractTrees.PreOrderDFS(html.root)
@@ -459,9 +464,9 @@ function inject_see_all_versions_option!(html::Gumbo.HTMLDocument, url::Abstract
         option = Gumbo.HTMLElement{:option}([], el, Dict("value" => url))
         push!(option.children, Gumbo.HTMLText(option, SEE_ALL_VERSIONS_LABEL))
         push!(el.children, option)
-        return true
+        break
     end
-    return false
+    return nothing
 end
 
 function make_output_structure(

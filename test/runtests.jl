@@ -5,7 +5,7 @@ using Test
     include("documentertools.jl")
 end
 
-@testset "include_versions patch" begin
+@testset "include_versions" begin
     include("include_versions.jl")
 end
 

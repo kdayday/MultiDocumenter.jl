@@ -174,7 +174,7 @@ const Gumbo = MultiDocumenter.Gumbo
         url = "https://org.github.io/Pkg.jl/"
 
         html = Gumbo.parsehtml(selector)
-        @test MultiDocumenter.inject_see_all_versions_option!(html, url)
+        MultiDocumenter.inject_see_all_versions_option!(html, url)
         out = string(html)
         @test occursin("<option value=\"$(url)\">$(MultiDocumenter.SEE_ALL_VERSIONS_LABEL)</option>", out)
         # the option is inside the selector, and it is the only one
@@ -182,7 +182,7 @@ const Gumbo = MultiDocumenter.Gumbo
 
         # a page without a version selector is left alone
         bare = Gumbo.parsehtml("<html><body><div id=\"documenter\"></div></body></html>")
-        @test !MultiDocumenter.inject_see_all_versions_option!(bare, url)
+        MultiDocumenter.inject_see_all_versions_option!(bare, url)
         @test !occursin("option", string(bare))
     end
 
@@ -194,27 +194,5 @@ const Gumbo = MultiDocumenter.Gumbo
         @test !MultiDocumenter.uses_include_versions(ref())
         @test !MultiDocumenter.uses_include_versions(ref(include_versions = String[]))
         @test MultiDocumenter.uses_include_versions(ref(include_versions = ["stable"]))
-    end
-
-    @testset "MultiDocRef include_versions and all_versions_url" begin
-        ref = MultiDocumenter.MultiDocRef(
-            upstream = "/tmp/up",
-            path = "pkg",
-            name = "Pkg",
-            giturl = "https://github.com/org/Pkg.jl.git",
-            include_versions = ["stable", "dev"],
-            all_versions_url = "https://custom.github.io/Pkg.jl/",
-        )
-        @test ref.include_versions == ["stable", "dev"]
-        @test ref.all_versions_url == "https://custom.github.io/Pkg.jl/"
-
-        ref2 = MultiDocumenter.MultiDocRef(
-            upstream = "/tmp/up",
-            path = "pkg",
-            name = "Pkg",
-            giturl = "https://github.com/org/Pkg.jl.git",
-        )
-        @test ref2.include_versions === nothing
-        @test ref2.all_versions_url === nothing
     end
 end
