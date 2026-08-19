@@ -33,26 +33,28 @@ const Gumbo = MultiDocumenter.Gumbo
 
     @testset "cp_select_versions with symlink stable" begin
         if Sys.iswindows()
-            @test_broken false # symlinks not reliably testable on Windows
-            return
-        end
-        mktempdir() do src
-            write(joinpath(src, "versions.js"), "var DOC_VERSIONS = [];")
-            mkdir(joinpath(src, "v5.5.0"))
-            write(joinpath(src, "v5.5.0", "siteinfo.js"), "{}")
-            # stable -> v5.5.0 (simulates Documenter deploy)
-            symlink("v5.5.0", joinpath(src, "stable"))
-            mkdir(joinpath(src, "dev"))
-            write(joinpath(src, "dev", "siteinfo.js"), "{}")
+            # symlinks are not reliably testable on Windows. Note that `return` here
+            # would exit the *enclosing* testset, silently skipping everything below.
+            @test_skip false
+        else
+            mktempdir() do src
+                write(joinpath(src, "versions.js"), "var DOC_VERSIONS = [];")
+                mkdir(joinpath(src, "v5.5.0"))
+                write(joinpath(src, "v5.5.0", "siteinfo.js"), "{}")
+                # stable -> v5.5.0 (simulates Documenter deploy)
+                symlink("v5.5.0", joinpath(src, "stable"))
+                mkdir(joinpath(src, "dev"))
+                write(joinpath(src, "dev", "siteinfo.js"), "{}")
 
-            mktempdir() do dst
-                MultiDocumenter.cp_select_versions(src, dst, ["stable", "dev"])
+                mktempdir() do dst
+                    MultiDocumenter.cp_select_versions(src, dst, ["stable", "dev"])
 
-                @test isfile(joinpath(dst, "versions.js"))
-                @test isdir(joinpath(dst, "stable"))
-                @test isfile(joinpath(dst, "stable", "siteinfo.js"))
-                @test isdir(joinpath(dst, "dev"))
-                @test !isdir(joinpath(dst, "v5.5.0"))
+                    @test isfile(joinpath(dst, "versions.js"))
+                    @test isdir(joinpath(dst, "stable"))
+                    @test isfile(joinpath(dst, "stable", "siteinfo.js"))
+                    @test isdir(joinpath(dst, "dev"))
+                    @test !isdir(joinpath(dst, "v5.5.0"))
+                end
             end
         end
     end

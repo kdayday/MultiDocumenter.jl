@@ -64,11 +64,12 @@ Represents one set of docs that will get an entry in the MultiDocumenter navigat
 * `include_versions`: if set (e.g. `["stable", "dev", "latest"]`), only these version directories are copied
   from upstream, reducing aggregate site size. Root files (e.g. `index.html`, `versions.js`) are always copied.
   When set, `versions.js` is rewritten to list only these versions.
-* `all_versions_url`: absolute URL of the upstream documentation site (e.g.
+* `all_versions_url`: absolute URL of the upstream documentation site root (e.g.
   `https://org.github.io/Pkg.jl/`). If set together with `include_versions`, a
   "See All Versions" entry pointing there is added to the version selector, so that the
   versions that were not copied remain reachable. Not set by default; version limiting
-  works without it.
+  works without it. Use the site root rather than a specific version: Documenter's selector
+  tries to stay on the equivalent page, so it may append the current page's path to this URL.
 """
 struct MultiDocRef <: DropdownComponent
     upstream::String
@@ -448,11 +449,16 @@ end
 """
 Add a "See All Versions" entry to Documenter's version selector, pointing at `url`.
 
-Documenter's own selector code (`assets/html/js/versions.js`) navigates to the `value` of
-the selected `<option>` and only ever appends to the selector -- it never clears it, and it
-matches the versions from `DOC_VERSIONS` against existing options by their text. So an
-`<option>` written in at build time survives untouched and needs no client side code; it
-ends up above the versions Documenter fills in.
+Documenter's own selector code (`assets/html/js/versions.js`) only ever appends to the
+selector -- it never clears it, and it matches the versions from `DOC_VERSIONS` against
+existing options by their text. So an `<option>` written in at build time survives
+untouched and needs no client side code; it ends up above the versions Documenter fills in.
+
+Selecting it hands over to Documenter's own handler, which tries to stay on the same page:
+it appends the current path below the version directory to `url`, `HEAD`s that, and falls
+back to `url` itself if the probe fails. `url` should therefore name a site root -- point it
+at a specific version and a visitor of `.../stable/man/guide.html` may well land on
+`.../<that version>/man/guide.html` instead of the page you meant.
 
 Pages without a version selector (e.g. the redirect stubs) are left alone.
 """
